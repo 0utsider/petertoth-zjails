@@ -1,0 +1,1146 @@
+#!/usr/bin/perl
+#-------------------------------------------------------------------------+
+# Author: Peter Toth                                                      |
+# Email : peter.toth@cellcontainer.com                                    |
+# Date  : 28.02.2012                                                      |
+#                                                                         |
+# Required modules        : POSIX, Getopt::Lucid, Net::FTP, Perl6::Form   | 
+# Minimum OS requirements : ZFSv28, FreeBSD 9.0 (amd64)                   |
+# ------------------------------------------------------------------------+
+# Copyright (C) 2012 Peter Toth
+# All rights reserved
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted providing that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+# STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+# IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+use strict;
+use warnings;
+
+use POSIX qw/strftime/;
+use Getopt::Lucid qw( :all );
+use Net::FTP;
+use Perl6::Form;
+
+# Configure your default settings here
+my $quota     = "6G";
+my $cprop     = "com.cellcontainer.jail:";
+my $dtemplate = "base";
+my $pool      = "tank";
+my $jails     = "zjails";
+my $jds       = "$pool/$jails/jds";
+my $zfs       = "/sbin/zfs";
+my $status;
+my $id;
+my $boot;
+my $cpuset    = `/usr/bin/cpuset -g | cut -d: -f 2 | tr -d '[:space:]'`;
+my $seclevel  = "2";
+my $hostuuid  = `uuidgen`;
+my $ftphost   = "ftp.freebsd.org";
+my $release   = `uname -r`;
+my @ftpfiles  = qw(base.txz doc.txz lib32.txz);
+
+my %container;
+   $container{local}      = "$jds/local";
+   $container{remote}     = "$jds/remote";
+   $container{replicated} = "$jds/replicated"; 
+   $container{templates}  = "$jds/templates";
+
+chomp($hostuuid);
+chomp($release);
+
+# Please don't modify bellow this line ---------------------------------------------
+my @config = qw/ hostname        ip             name
+                 origin          cname          jail
+                 devfs_ruleset   exec_start     exec_stop
+                 mount_enable    devfs_enable   procfs_enable
+                 fdescfs_enable  flags          cpuset
+                 fib             template       quota
+                 origin          boot           notes
+                 mountpoint      compression    compressratio
+                 available       used           id
+                 dedup           seclevel       hostuuid
+                 priority        last_started   last_shutdown
+                 template_name   owner          itype
+                 defaultroute    vnet_if        netmask
+                 vnet0_sw        vnet1_sw       vnet2_sw
+             /;
+
+# This is a simple reference for the @config array above
+#--------------------------------------------------------
+# hostname		0	1	2
+# origin		3	4	5
+# devfs_ruleset		6	7	8
+# mount_enable		9	10	11
+# fdescfs_enable	12	13	14
+# fib			15	16	17
+# origin		18	19	20
+# mountpoint		21	22	23
+# available		24	25	26
+# dedup			27	28	29
+# priority		30	31	32
+# template_name		33	34	35
+# defaultroute		36	37	38
+#--------------------------------------------------------
+
+my @specs = (   Switch("create")           ->needs("hostname","ip"),
+                Switch("clone")            ->needs("hostname","ip"),
+                Switch("set"),
+                Switch("show|sw"),
+                Switch("list|ls"),
+                Switch("backup|send"),
+                Switch("restore|receive"),
+                Switch("destroy"),
+                Switch("start"),
+                Switch("stop"),
+                Switch("console|co"),
+                Switch("startall"),
+                Switch("stopall"),
+                Switch("rename"),
+                Switch("templates"),
+                Switch("clones"),
+                Switch("all"),
+                Switch("remote"),
+                Switch("replicated"),
+                Switch("local"),
+                Switch("install"),
+                Switch("take_template|tt"),
+                Switch("move|mv"),
+                Switch("restart"),
+                Switch("thin"),
+                Switch("cold|-c"),
+                # Jail settings --------------------------------------
+                Param("hostname|host"),
+                Param("ip"),
+                Param("jail"),
+                Param("name|n"),
+                Param("file"),
+                Param("cname|cn"),
+                Param("dedup|dd")             ->default("off"),
+                Param("compression|comp")     ->default("off"),
+                Param("quota|q")              ->default("$quota"),
+                Param("template|temp")        ->default("$dtemplate"),
+                Param("notes")                ->default("none"),
+                Param("boot")                 ->default("on"),
+                Param("devfs_ruleset")        ->default("devfsrules_jail"),
+                Param("exec_start")           ->default("/bin/sh /etc/rc"),
+                Param("exec_stop")            ->default("/bin/sh /etc/rc.shutdown"),
+                Param("mount_enable")         ->default("YES"),
+                Param("devfs_enable")         ->default("YES"),
+                Param("procfs_enable")        ->default("YES"),
+                Param("fdescfs_enable")       ->default("YES"),
+                Param("flags")                ->default("\-l\ \-U\ root"),
+                Param("cpuset|cpu")           ->default("$cpuset"),
+                Param("fib")                  ->default("0"),
+                Param("seclevel|s")           ->default("$seclevel"),
+                Param("hostuuid|hu")          ->default("$hostuuid"),
+                Param("priority|p")           ->default("99"),
+                Param("owner")                ->default("none"),
+                Param("itype")                ->default("ftp"),
+                Param("container")            ->default("local"),
+                Param("vnet_if")              ->default("vnet0"),
+                Param("netmask")              ->default("24"),
+                Param("defaultroute")         ->default("0.0.0.0"),
+                Param("vnet0_sw")             ->default("bridge0"),
+                Param("vnet1_sw"),
+                Param("vnet2_sw"),
+);
+
+my $opts  = Getopt::Lucid->getopt( \@specs ); # Process the command arguments and call the right function
+my %opts  = $opts->options;
+
+if ($opts{priority} gt "99") {
+    die " Error: option \"priority\" must be within range 0-99!\n";
+}
+
+if ($opts{create} eq 1) {
+    $opts{name}  = $ARGV[0];
+    &check_jname($opts{name});
+    &check_root("create");
+    &create($opts{name});
+}
+elsif ($opts{clone} eq 1) {
+    $opts{name}  = $ARGV[0];
+    $opts{cname} = $ARGV[1];
+    &check_root("clone");
+    &clone($opts{name});
+}
+elsif ($opts{set} eq 1) {
+    $opts{name}  = $ARGV[0];
+    &check_root("set");
+    &set($opts{name});
+}
+elsif ($opts{show} eq 1) {
+    $opts{name} = $ARGV[0];
+    &show($ARGV[0]);
+}
+elsif ($opts{list} eq 1) {
+    &list;
+}
+elsif ($opts{backup} eq 1) {
+    &check_root("backup");
+    &backup($ARGV[0]);
+}
+elsif ($opts{restore} eq 1) {
+    &check_root("restore");
+    &restore;
+}
+elsif ($opts{destroy} eq 1) {
+    $opts{name} = $ARGV[0];
+    &check_root("destroy");
+    &destroy($ARGV[0]);
+}
+elsif ($opts{start} eq 1) {
+    $opts{name} = $ARGV[0];
+    &check_root("start");
+    &start_stop("start",$opts{name});
+}
+elsif ($opts{stop} eq 1) {
+    $opts{name} = $ARGV[0];
+    &check_root("stop");
+    &start_stop("stop",$opts{name});
+}
+elsif ($opts{console} eq 1) {
+    &check_jname($ARGV[0]);
+    $opts{name} = $ARGV[0];
+    &check_root("console");
+    &console;
+}
+elsif ($opts{startall} eq 1) {
+    &check_root("startall");
+    &start_stop_all("startall");
+}
+elsif ($opts{stopall} eq 1) {
+    &check_root("stopall");
+    &start_stop_all("stopall");
+}
+elsif ($opts{rename} eq 1) {
+    &check_jname($ARGV[0]);
+    &check_root("rename");
+    &rename($ARGV[0],$ARGV[1]);
+}
+elsif ($opts{install} eq 1) {
+    &check_root("install");
+    &install("$opts{itype}");
+}
+elsif ($opts{take_template} eq 1) {
+    $opts{name} = $ARGV[0];
+    $opts{cname} = $ARGV[1];
+    $opts{hostname} = "-";
+    $opts{ip} = "-";
+    &check_root("template");
+
+    if ($opts{thin} eq 1) {
+        &clone($opts{name});
+    }
+    else {
+       &take_template($opts{name}); 
+    }
+}
+elsif ($opts{move} eq 1) {
+    &check_root("move");
+    &move($ARGV[0]);
+}
+elsif ($opts{restart} eq 1) {
+    &check_root("restart");
+    &restart($ARGV[0]);
+}
+else {
+    &help;
+}
+
+sub label { # Set or label custom ZFS properties for our jails
+    my ($jail)  = @_;
+    $opts{name} = $jail;
+    my $dataset = &find_jail("$jail");
+    my @zconf   = @config[ 0,  1,  2,  6,  7,
+                           8,  9, 10, 11, 12,
+                          13, 14, 15, 17, 19,
+                          20, 22, 27, 28, 29,
+                          30, 36, 37, 38, 39,
+                          40, 41
+    ]; # pick only entries we need
+
+    if ($opts{set} eq "1") { # Workaround "set" subcommand as there is no need for the name to be set again
+        delete($opts{name});
+    }
+
+    print " ** Configuring jail: $jail **\n";
+
+    while (<@zconf>) {
+        if (defined($opts{$_})) {
+            print "  Setting $_: $opts{$_}\n";
+            if ($_ eq "quota" || $_ eq "compression" || $_ eq "dedup") {
+                system "$zfs set $_\=$opts{$_} $dataset";
+            }
+            else {
+                system "$zfs set $cprop$_\=\"$opts{$_}\" $dataset";
+            }
+        }
+        else {
+            next;
+        }
+    }
+}
+
+sub show {
+    my ($value,@rows);
+    my ($jail)  = @_;
+    my $dataset = &find_jail($jail);
+    my @zconf   = @config[ 26,  2,  1,  0, 29,
+                           17, 24, 25, 19, 20,
+                           21,  6,  7,  8,  9,
+                           10, 11, 12, 13, 14,
+                           15, 22, 23, 27,  3,
+                           28, 30, 31, 32, 36,
+                           37, 38, 39, 40, 41
+    ];
+ 
+    sub format_show { # Format output 
+        my ($field1,$field2) = @_;
+
+        print form 
+            "{>>>>>>>>>>>>>>>>>>>} : {<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<}",
+                          $field1,   $field2;
+    }
+
+    while (<@zconf>) {
+        if ($_ eq "quota"  || $_ =~ "mountp.*" ||
+            $_ =~ "comp.*" || $_ =~ "avai.*"   ||
+            $_ =~ "used.*" || $_ =~ "dedup") {
+            $value = `$zfs get -Ho value $_ $dataset`;
+            &format_show($_,$value); # write formatted output 
+        } 
+        elsif ($_ eq "status" || $_ eq "id") {
+            $value = &status($_);
+            &format_show($_,$value);
+        } 
+        elsif ($_ eq "origin") {
+            $value = `$zfs get -Ho value $_ $dataset`;
+            chomp($value);
+
+            if ($value eq '-') {
+                $value = "no";
+            }
+            else {
+                $value = "yes";
+            }
+
+            $_ = "clone";
+            &format_show($_,$value);
+        }
+        else {
+            $value = `$zfs get -Ho value $cprop$_ $dataset`;
+            &format_show($_,$value);
+        }
+    }
+
+}
+
+sub create {
+    my ($jail)  = @_;
+    my $dataset = &check_jail($jail);
+    my $origin  = `$zfs get -Ho value origin $container{templates}\/$opts{template}`;
+    chomp($origin);
+
+    if ($origin ne '-') {
+        print " Info: Source template $opts{template} is a clone, cloning template to $jail instead!\n";
+        $opts{cname} = $jail;
+        $opts{name} = $opts{template};
+        &clone($opts{template});
+        exit 0;
+    }
+
+    if ($dataset ne 1) {
+        die " Error: $jail already exist!\n";
+    }
+
+    print " Deploying $opts{name} please wait..\n";
+
+    system "$zfs snapshot -r $container{templates}\/$opts{template}\@create";
+    system "$zfs send -R $container{templates}\/$opts{template}\@create | $zfs recv $jds\/local\/$opts{name}";
+
+    if ($? eq 1) {
+        die " Failed to create: $jds\/local\/$opts{name}!\n"
+    }
+
+    system "$zfs destroy -r $jds\/local\/$opts{name}\@create";
+    system "$zfs destroy -r $container{templates}\/$opts{template}\@create";
+
+    &label($opts{name});
+    my $fs    = &find_jail($opts{name});
+    my $fpath = `$zfs get -Ho value mountpoint $fs`;
+    chomp($fpath);
+    system "touch $fpath/fstab";
+}
+
+sub clone {
+    my ($jail)    = @_;
+    my $dataset   = &find_jail($jail);
+    my $exist     = &check_jail($opts{cname});
+    my $snap_time = strftime('%d-%m-%Y--%H:%M:%S',localtime); # Date timestamp for snapshot name
+    my @subjds    = `zfs list -rH -o name $dataset`; # Find all filesystems belonging to the jail
+    my $container = $container{local};
+    chomp(@subjds);
+
+    if ($opts{name} eq $opts{cname}) {
+        die " Error: Clone's name is identical with source jail's name!\n";
+    }
+
+    if ($exist ne 1) {
+        die " Error: $opts{cname} already exist!\n";
+    }
+
+    if ($opts{take_template} eq 1) {
+        $container = $container{templates}; 
+    }
+    else {
+        $container = $container{local};
+    }
+
+    system "$zfs snapshot -r $dataset\@clone_src_for_$opts{cname}_$snap_time"; # Take the required ZFS snapshot for cloning
+    system "$zfs hold -r jail_clone $dataset\@clone_src_for_$opts{cname}_$snap_time"; # Tag the snapshot with "hold" to avoid accidental loss
+    system "$zfs clone $dataset\@clone_src_for_$opts{cname}_$snap_time $container\/$opts{cname}"; # Clone the top level jail filesystem
+
+    shift(@subjds); # Take out the first element as this was cloned above
+
+    foreach (@subjds) { # Clone each filesystem belonging to the jail
+        my $clonejds = $_;
+
+        if ($opts{take_template} eq 1) {
+            $clonejds =~ s/$container{local}/$container{templates}/g;
+        }
+
+        $clonejds =~ s/$opts{name}/$opts{cname}/g;
+
+        $clonejds =~ s/$container{remote}/$container/g;
+        $clonejds =~ s/$container{replicated}/$container/g;
+        $clonejds =~ s/$container{templates}/$container/g;
+
+        system "$zfs clone $_\@clone_src_for_$opts{cname}_$snap_time $clonejds";
+        if ($? != 0) {
+            die " \nCloning failed!\n";
+        }
+    }
+    &label($opts{cname});
+    my $fs    = &find_jail($opts{cname});
+    my $fpath = `$zfs get -Ho value mountpoint $fs`;
+    chomp($fpath);
+    system "touch $fpath/fstab";
+}
+
+sub start_stop {
+    my ($action, $jail) = @_;
+    my $dataset = &find_jail($jail);
+    my %zconf;
+    my $date            = strftime('%d.%m.%Y\@%H:%M:%S',localtime); # Date timestamp for last_started
+    $opts{name}         = $jail; # Needed for boot time 
+    my @zconf           = @config[ 0,  1,  2,  6,  7,
+                                   8,  9, 10, 11, 12,
+                                  13, 14, 15, 20, 21,
+                                  28, 29, 30, 36, 37,
+                                  38
+    ];
+
+    while (<@zconf>) {
+        if ($_ eq "mountpoint") { # "mountpoint" zfs property is also our root path for the jail
+            $zconf{$_} = `$zfs get -Ho value $_ $dataset`;
+            chomp $zconf{$_};
+        }
+        else {
+            $zconf{$_} = `$zfs get -Ho value $cprop$_ $dataset`;
+            chomp $zconf{$_};
+        }
+    }
+
+    # Set all required variables before firing up the jail
+    $ENV{"jail_".$jail."_mount_enable"}   = "$zconf{mount_enable}";
+    $ENV{"jail_".$jail."_devfs_ruleset"}  = "$zconf{devfs_ruleset}";
+    $ENV{"jail_".$jail."_fstab"}          = "$zconf{mountpoint}\/fstab";
+
+    my @procfs  = `/sbin/mount -pt procfs`;
+    my @devfs   = `/sbin/mount -pt devfs`;
+    my @fdescfs = `/sbin/mount -pt fdescfs`;
+
+    chomp(@procfs);
+    chomp(@devfs);
+    chomp(@fdescfs);
+
+    my $procfs  = "no";
+    my $devfs   = "no";
+    my $fdescfs = "no";
+
+    while (<@procfs>) {
+        if ($_ =~ m/\/$jail\//) {
+            $procfs = "yes";
+        }
+    }
+
+    while (<@devfs>) {
+        if ($_ =~ m/\/$jail\//) {
+            my $devfs = "yes";
+        }
+    }
+
+    while (<@fdescfs>) {
+        if ($_ =~ m/\/$jail\//) {
+            my $fdescfs = "yes";
+        }
+    }
+
+    &status;
+
+    if ($opts{cold} ne 1 && $action eq "start" && $id ne "n") {
+        my $jprocs = `pgrep -j $id`;
+        chomp($jprocs);
+
+        if ($jprocs lt 1) {
+            print "  Initiating soft start for: $jail\n";
+            system "jexec $jail $zconf{exec_start} >> $zconf{mountpoint}\/console.log 2>&1";
+        }
+    }
+    elsif ($opts{cold} ne 1 && $action eq "stop" && $id ne "n") {
+        my $jprocs = `pgrep -j $id`;
+        chomp($jprocs);
+        if ($jprocs gt 0) {
+            print "  Initiating soft shutdown for: $jail\n";
+            system "jexec $jail $zconf{exec_stop} >> $zconf{mountpoint}\/console.log 2>&1";
+            system "pkill -j $id";
+        }
+    }
+    elsif ($opts{cold} eq 1 && $action eq "start" && $id eq "n" || $opts{cold} ne 1 && $action eq "start" && $id eq "n") {
+        if ($zconf{procfs_enable} eq "YES" && $procfs eq "no") {
+            system "/sbin/mount -t procfs procfs $zconf{mountpoint}\/root/proc";
+        }
+        if ($zconf{devfs_enable} eq "YES" && $devfs eq "no") {
+            system "/sbin/mount -w -t devfs devfs $zconf{mountpoint}\/root/dev";
+           # system "/sbin/devfs -m $zconf{mountpoint}\/root/dev rule -s 4 applyset";
+        }
+        if ($zconf{fdescfs_enable} eq "YES" && $fdescfs eq "no") {
+            system "/sbin/mount -t fdescfs fdescfs $zconf{mountpoint}\/root/dev/fd";
+        }
+
+        print "  Initiating cold start for: $jail\n";
+        system "jail -c vnet name=$jail host.hostname=$zconf{hostname} path=$zconf{mountpoint}\/root securelevel=$zconf{seclevel} host.hostuuid=$zconf{hostuuid} enforce_statfs=1 allow.mount=1 persist";
+
+        system "jls | grep $jail | awk '{print \$1}' > /var/run/jail_$opts{name}.id";
+        system "$zfs set $cprop$config[31]\=$date $dataset";
+
+        system "jexec $jail /sbin/ifconfig lo0 127.0.0.1 up";
+
+        &status; # Get $id
+
+        my @ifaces = $zconf{vnet_if};
+
+        while (<@ifaces>) {
+            my $epair = `/sbin/ifconfig epair create`;
+            chomp($epair);
+
+            $epair =~ s/[a-z]//g;
+
+            my $epair_a = "epair".$epair."a";
+            my $epair_b = "epair".$epair."b";
+            my $vswitch = `$zfs get -Ho value $cprop$_"_sw" $dataset`;
+            chomp($vswitch);
+            print "  $_\-\>$vswitch\n";
+
+            system "/sbin/ifconfig $epair_a name $_-$id";
+            
+            #system "/sbin/ifconfig $vswitch addm $_-$id up";
+            #system "/sbin/ifconfig $_-$id up";
+            system "/sbin/ifconfig $epair_b vnet $jail";
+            system "jexec $jail /sbin/ifconfig $epair_b name $_";
+
+            if ($_ eq "vnet0" && $vswitch ne "-") {
+                system "/sbin/ifconfig $vswitch addm $_-$id up";
+                system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
+                system "jexec $jail /sbin/ifconfig $_ $zconf{ip}/$zconf{netmask}";
+                system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
+                system "/sbin/ifconfig $_-$id up";
+            }
+            elsif ($_ ne "vnet0" && $vswitch ne "-") {
+                system "/sbin/ifconfig $vswitch addm $_-$id up";
+                system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
+                system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
+                system "/sbin/ifconfig $_-$id up";
+            }
+        }
+
+
+        system "/sbin/devfs -m $zconf{mountpoint}\/root/dev rule -s 4 applyset";
+        system "/sbin/devfs -m $zconf{mountpoint}\/root/dev rule -s 10 applyset";
+        system "cd $zconf{mountpoint}\/root/dev && ln -s ../var/run/log log";
+        system "jexec $jail $zconf{exec_start} >> $zconf{mountpoint}\/console.log 2>&1";
+        system "/usr/bin/cpuset -l $zconf{cpuset} -j $id"; # Set CPU affinity
+        print "         CPU: $zconf{cpuset}\n";
+
+    }
+    elsif ($opts{cold} eq 1 && $action eq "stop" && $id ne "n" || $action eq "cstop" && $id ne "n") {
+        &status; # Get $id
+
+        if ($id eq "n") {
+            die "Jail: $jail not running\n";
+        }
+
+        print "  Initiating cold shutdown for: $jail\n";
+        system "jexec $jail $zconf{exec_stop} >> $zconf{mountpoint}\/console.log 2>&1";
+        system "jail -r $id";
+
+        if ($procfs eq "yes") {
+            system "/sbin/umount $zconf{mountpoint}\/root/proc";
+        }
+        if ($fdescfs eq "yes") {
+            system "/sbin/umount $zconf{mountpoint}\/root/dev/fd";
+        }
+        if ($devfs eq "yes") {
+            system "/sbin/umount $zconf{mountpoint}\/root/dev";
+        }
+
+        my @ifaces = $zconf{vnet_if};
+
+        while (<@ifaces>) {
+            system "/sbin/ifconfig $_-$id destroy";
+        }
+
+        system "$zfs set $cprop$config[32]\=$date $dataset";
+        unlink "/var/run/jail_$opts{name}.id";
+    }
+    else {
+        die "  Error: Could not $action - $jail\n";
+    }
+
+}
+
+sub restart {
+    my ($jail) = @_;
+
+    &start_stop("stop",$jail);
+    &start_stop("start",$jail);
+}
+
+sub destroy {
+    my ($jail)    = @_;
+    my $dataset   = &find_jail($jail);
+
+    my $origin = `$zfs get -Ho value origin $dataset`;
+    #my @subjds = `$zfs list -rH -o name $dataset`;
+
+    chomp($origin);
+    #chomp(@subjds);
+
+
+    if ($origin eq "-") { # Check for clones or fat jails
+        system "$zfs destroy -r $dataset";
+        #if ($? == "0") {
+        #    unlink "/etc/fstab.$opts{name}";
+        #}
+    }
+    else { # Remove clone with source snapshots as well
+        #print "releasing $origin\n";
+        system "$zfs release -r jail_clone $origin";
+        system "$zfs destroy -r $dataset";
+        system "$zfs destroy -r $origin";
+
+        #if ($? == "0") {
+        #    unlink "/etc/fstab.$opts{name}";
+        #}
+    }
+}
+
+sub backup {
+    my ($jail)   = @_;
+    my $dataset  = &find_jail($jail);
+    my $snapshot = strftime('%d-%m-%Y--%H:%M:%S',localtime);
+
+    system "$zfs snapshot -r $dataset\@backup_$snapshot";
+    system "$zfs send -R $dataset\@backup_$snapshot";
+    system "$zfs destroy -r $dataset\@backup_$snapshot";
+}
+
+sub restore {
+    my ($jail)   = @_;
+    my $dataset  = &check_jail($jail);
+
+    if ($dataset ne 1) {
+        die " Error: $jail already exist!\n";
+    }
+    else {
+        print " Restoring...\n";
+        system "$zfs recv -v $container{$opts{container}}\/$jail";
+    }
+}
+
+sub status {
+    my ($input) = @_;
+
+    if ( -e "/var/run/jail_$opts{name}.id" ) {
+        open my $FILE, '<', "/var/run/jail_$opts{name}.id"
+        or die " Can't open /var/run/jail_$opts{name}.id";
+
+        $status = "up";
+        $id = <$FILE>;
+        chomp($id);
+    }
+    else {
+        $status = "down";
+        $id = "n";
+    }
+
+    if ($input eq "status") {
+        return "$status";
+    }
+    elsif ($input eq "id") {
+        return "$id";
+    }
+    elsif ($input eq "boot") {
+        return "$boot";
+   }
+}
+
+sub list {
+    my @datasets;
+
+    if ($opts{templates} eq 1) {
+        @datasets = $container{templates};
+    }
+    elsif ($opts{replicated} eq 1) {
+        @datasets = $container{replicated};
+    }
+    elsif ($opts{remote} eq 1) {
+        @datasets = $container{remote}; 
+    }
+    elsif ($opts{all} eq 1) {
+        @datasets = ("$container{local}","$container{replicated}","$container{remote}","$container{templates}");
+    }
+    elsif ($opts{local} eq 1) {
+        @datasets = $container{local};
+    }
+    else {
+        @datasets = ("$container{local}","$container{replicated}");
+    }
+
+    my @jails;
+
+    foreach (<@datasets>) {
+        my @list = `$zfs list -rHo name -d1 $_`;
+        shift(@list);
+        push(@jails, @list);
+    }
+
+    my $njails = @jails;
+
+    if ($njails == "0") {
+        die " Empty container.. nothing to list...\n";
+    }
+
+    my @conf = @config[2,0,1,17,24,25,3,19,30];
+
+    sub format_head {
+        print form
+            "+---------------------------------------------------------------------------------------------------------------------------+",
+            "| Id   Name                Hostname                            IPv4/6          Quota   Free   Size  Clone  Boot  BP  Status |",
+            "+---------------------------------------------------------------------------------------------------------------------------+";
+    }
+
+    sub format_body {
+        my ($id,$name,$hostname,$ip,$quota,$free,$size,$clone,$boot,$bp,$status) = @_;
+        print form
+            "| {|}  {[[[[[[[[[[[[[[[[[} {[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[} {[[[[[[[[[[[[[[} {>>>}  {>>>}  {>>>}    {>}   {>} {>}   {|||} |",
+            $id, $name, $hostname,     $ip,             $quota, $free, $size, $clone, $boot, $bp, $status;
+    }
+
+    sub format_foot {
+        print form
+            "+---------------------------------------------------------------------------------------------------------------------------+";
+    }
+
+    &format_head;
+
+    while (<@jails>) {
+        my @listattr = `$zfs get -Ho value "$cprop$conf[0],$cprop$conf[1],$cprop$conf[2],$conf[3],$conf[4],$conf[5],$conf[6],$cprop$conf[7],$cprop$conf[8]" $_`;
+        chomp(@listattr);
+
+        if ( -e "/var/run/jail_$listattr[0].id" ) {
+            open my $FILE, '<', "/var/run/jail_$listattr[0].id"
+            or die " Can't open /var/run/jail_$listattr[0].id";
+           
+            my $jid = <$FILE>;
+            my $jprocs = `pgrep -j $jid`;
+            chomp($jprocs);
+ 
+            if ($jprocs lt 1) {
+                push @listattr, "soft";
+            }
+            else {
+                push @listattr, "Up";
+            }
+            unshift @listattr, $jid;
+        }
+        else {
+            push @listattr, "down";
+            unshift @listattr, "--"
+        }
+
+        if ($listattr[7] ne '-') {
+            $listattr[7] = "yes";
+        }
+        else {
+            $listattr[7] = "no";
+        }
+        &format_body(@listattr);
+    }
+    &format_foot;
+}
+
+sub set {
+    my ($jail) = @_;
+    my %setopts  = $opts->replace_defaults;
+    my %tmp;
+
+    if (!defined($jail)) {
+        die " Error: Missing jail name!\n";
+    }
+
+    foreach (keys %setopts) {
+        if (defined($setopts{$_})) {
+            $tmp{$_} = $setopts{$_} ;
+        }
+    }
+
+    %opts = %tmp;
+    &label($jail);
+}
+
+sub help {
+    print form "Usage: zjail list [all templates replicated remote]",
+               "       zjail show jailname",
+               "       zjail create jailname ip= hostname= [property=value]",
+               "       zjail start jailname",
+               "       zjail stop jailname",
+               "       zjail restart",
+               "       zjail rename jailname newname",
+               "       zjail move jailname container=[local replicated]",
+               "       zjail clone jailname clonename ip= hostname= [property=value]",
+               "       zjail startall",
+               "       zjail stopall",
+               "       zjail set [property=value] jailname",
+               "       zjail install",
+               "       zjail destroy jailname",
+               "       zjail backup jailname",
+               "       zjail restore jailname",
+               "       zjail console jailname",
+               "       zjail take_template jailname templatename";
+}
+
+sub console {
+    #&status($config[26]);
+    system "jexec $opts{name} login -f root";
+}
+
+sub start_stop_all {
+    my @priority_list;
+    my @order;
+    my @conf        = @config[2,19,30];
+    my @start_order = \@priority_list; # Array in array
+    my $action      = $_[0];
+    my @jails;
+
+    my @boot_datasets = ("$container{local}","$container{replicated}");
+
+    foreach (<@boot_datasets>) {
+        my @list = `$zfs list -rHo name -d1 $_`;
+        shift(@list);
+        push(@jails, @list);
+    } 
+
+    while (<@jails>) {
+        my @listattr = `$zfs get -Ho value "$cprop$conf[0],$cprop$conf[1],$cprop$conf[2]" $_`;
+        chomp(@listattr);
+
+        if ( -e "/var/run/jail_$listattr[0].id" ) {
+            open my $FILE, '<', "/var/run/jail_$listattr[0].id"
+            or die " Can't open /var/run/jail_$listattr[0].id";
+
+            my $jid = <$FILE>;
+            my $jprocs = `pgrep -j $jid`;
+            chomp($jprocs);
+
+            if ($jprocs lt 1) {
+               $listattr[3] = "soft";
+            }
+            else {
+               $listattr[3] = "up";
+            }
+        }
+        else {
+            $listattr[3] = "down";
+        
+        }
+
+        if ($listattr[3] eq "down" && $listattr[1] eq "on" && $action eq "startall" || $listattr[3] eq "soft" && $listattr[1] eq "on" && $action eq "startall") {
+            push @{ $start_order[$listattr[2]] }, "$listattr[0]";
+        }
+        elsif ($listattr[3] eq "up" && $action eq "stopall" || $listattr[3] eq "soft" && $action eq "stopall") {
+            push @{ $start_order[$listattr[2]] }, "$listattr[0]";
+        }
+    }
+    
+    if ($action eq "stopall") {
+        @order = reverse(@start_order); # Get the reverse of $startorder
+    }
+    elsif ($action eq "startall") {
+        push(@order, @start_order);
+    } 
+
+    foreach my $priority (0..@order) {
+        if ($order[$priority]) {
+            foreach my $jail (0..@{$order[$priority]}) {
+                if ($order[$priority][$jail] && $action eq "startall") {
+                    #print "Starting: $order[$priority][$jail]\n";
+                    &start_stop("start",$order[$priority][$jail]);
+                }
+                elsif ($opts{cold} ne 1 && $order[$priority][$jail] && $action eq "stopall") {
+                    &start_stop("stop",$order[$priority][$jail]);
+                }
+                elsif ($opts{cold} eq 1 && $order[$priority][$jail] && $action eq "stopall") {
+                    &start_stop("cstop",$order[$priority][$jail]);
+                }
+            }
+        }
+    } 
+}
+
+sub rename {
+    my ($old_name,
+        $new_name) = @_;
+    my $dataset   = &find_jail($old_name);
+    chomp($dataset);
+
+    if ($old_name && $new_name && $dataset) {
+        system "$zfs rename $dataset $jds\/local\/$new_name";
+        system "$zfs set $cprop$config[2]\=$new_name $jds\/local\/$new_name";
+        if ($? eq 0) {
+            print " Successfuly renamed jail: $old_name to $new_name..\n";
+        }
+    }
+    else {
+        die " Error: Could not rename jail: $old_name to $new_name\n";
+    }
+}
+
+sub check_root {
+    my ($function) = @_;
+    my  $user      = getpwuid($<);
+
+    if ($user ne "root") {
+        die " Error: You need to be root to use the \"$function\" function!\n";
+    }
+}
+
+sub install {
+    my ($type) = @_;
+
+    sub ftp {
+        my ($file)   = @_;
+        my $dir      = "/pub/FreeBSD/releases/amd64/amd64/$release";
+        my $ftp      = Net::FTP->new($ftphost, Debug => 0)
+            or die " Cannot connect to $ftphost: $@";
+
+        $ftp->login("anonymous",'-anonymous@')
+            or die " Cannot login ", $ftp->message;
+
+        $ftp->cwd($dir)
+            or die " Cannot change working directory ", $ftp->message;
+        print " getting file: $ftphost$dir/$file\n";
+        $ftp->binary;
+        $ftp->get($file, "/$jails/install/$file")
+            or die " get failed ", $ftp->message;
+        $ftp->quit;
+    }
+
+    sub check_base {
+        if (-e "/$jails/jds/templates/$dtemplate") {
+            print " Warning: /$jails/jds/templates/$dtemplate already exists! would you like to continue?!\n  yes|no\n:";
+            my $answer = <>;
+            chomp($answer);
+            
+            if ($answer eq "yes" || $answer eq "y") {
+                print " Continuing...\n";
+                system "/usr/bin/find /$jails/jds/templates/$dtemplate -flags \+schg -exec chflags noschg {} \\;";
+            }
+            elsif ($answer eq "no" || $answer eq "n") {
+                die " Exiting...\n";
+            }
+            else {
+                die " Error: invalid answer: $answer exiting..\n";
+            }
+        }
+        else {
+            &partition;
+        }
+    }
+
+    sub partition {
+        my @datasets = ("$container{local}","$container{remote}","$container{replicated}","$container{templates}");
+        print " Creating base jail ZFS datasets..\n";
+
+        system "$zfs create -p $pool\/$jails\/install";
+        system "$zfs create -p $jds";
+        system "$zfs create -p $container{templates}";
+
+        foreach (<@datasets>) {
+            print " Creating $_\n";
+            system "$zfs create -p $_";
+        }
+
+        system "$zfs create -p $container{templates}\/$dtemplate\/root\/usr\/local";
+        system "$zfs create $container{templates}\/$dtemplate\/root\/var";
+        system "$zfs set mountpoint\=/$jails $pool\/$jails";
+        system "$zfs set $cprop$config[2]\=base $container{templates}\/$dtemplate";
+        system "$zfs set $cprop$config[20]\=\"installation base template for FreeBSD $release\" $container{templates}\/$dtemplate";
+    }
+
+    sub get_and_extract {
+        foreach (<@ftpfiles>) {
+            if (!-e "/$jails/install/$_") {
+                &ftp($_);
+                print " Extracting $_\n";
+                system "tar -C /$jails/jds/templates/$dtemplate\/root -xf /$jails/install/$_";
+            }
+            else {
+                print " Extracting $_\n";
+                system "tar -C /$jails/jds/templates/$dtemplate\/root -xf /$jails/install/$_";
+            }
+        }
+    }
+
+    sub make_install {
+        my $destdir = "/$jails/jds/templates/$dtemplate\/root";
+        system "cd /usr/src && make world DESTDIR=$destdir && make distribution DESTDIR=$destdir";
+    }
+
+    if ($type eq "ftp") {
+        &check_base;
+        &get_and_extract;
+    }
+    elsif ($type eq "src") {
+        &check_base;
+        &make_install;
+    }
+    
+}
+
+sub find_jail {
+    my ($jail) = @_;
+    my ($dataset, @jails);
+    my $exist = "0";
+    my @datasets = ("$container{local}","$container{replicated}","$container{remote}","$container{templates}");
+    
+    &check_jname($jail);
+
+    foreach (<@datasets>) {
+        my @list = `$zfs list -rHo name -d1 $_`;
+        shift(@list);
+        push(@jails, @list);
+    } 
+
+    chomp(@jails);
+
+    foreach (<@jails>) {
+        if ($_ =~ m/$jail$/) {
+            return "$_";
+            $exist = "1";
+        }
+    }
+
+    if ($exist lt "1") {
+        die " Error: Jail $jail does not exist!\n"; 
+    }
+}
+
+sub check_jail {
+    my ($jail) = @_;
+    my ($dataset, @jails);
+    my $exist = "0";
+    my @datasets = ("$container{local}","$container{replicated}","$container{remote}","$container{templates}");
+    
+    &check_jname($jail);
+
+    foreach (<@datasets>) {
+        my @list = `$zfs list -rHo name -d1 $_`;
+        shift(@list);
+        push(@jails, @list);
+    } 
+
+    chomp(@jails);
+
+    foreach (<@jails>) {
+        if ($_ =~ m/$jail$/) {
+            return "$_";
+            $exist = "1";
+        }
+    }
+
+    if ($exist lt "1") {
+        return 1;
+    }
+}
+
+
+sub check_jname {
+    my ($jail) = @_;
+
+    if (! defined $jail) {
+        die " Error: Missing jail name!\n";
+    }
+}
+
+sub move {
+    my ($jail)   = @_;
+    my  $dataset = &find_jail($jail);
+
+    print " Moving $jail to $container{$opts{container}}\/$jail\n";
+    system "$zfs rename $dataset $container{$opts{container}}\/$jail";
+}
+
+sub take_template {
+    my ($jail) = @_;
+    my  $dataset = &find_jail($jail);
+    my  $name  = "name";
+    my  $notes = "notes";
+    my  $exist = &check_jail($opts{cname});
+
+    if ($exist ne 1) {
+        die " Error: Template $opts{cname} already exist!\n";
+    }
+
+    system "$zfs snapshot -r $dataset\@convert";
+    system "$zfs send -R $dataset\@convert | zfs recv $container{templates}\/$opts{cname}";
+    system "$zfs set $cprop$name\=$opts{cname} $container{templates}\/$opts{cname}";
+    system "$zfs set $cprop$notes\=\"$opts{notes}\" $container{templates}\/$opts{cname}";
+    system "$zfs destroy -r $dataset\@convert";
+    system "$zfs destroy -r $container{templates}\/$opts{cname}\@convert";
+
+    &label($opts{cname});
+    my $fs    = &find_jail($opts{cname});
+    my $fpath = `$zfs get -Ho value mountpoint $fs`;
+    chomp($fpath);
+    system "touch $fpath/fstab";
+}
