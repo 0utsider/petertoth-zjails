@@ -1,0 +1,325 @@
+WHAT IS ZJAIL?
+--------------
+
+Zjail is a management tool intended to ease ZFS jails administration on FreeBSD.
+
+Some of the available features:
+          - templating
+          - VNET support
+          - hot cloning
+          - thin & thick creation
+          - replication (with helper script and zfsnap)
+          - up to 3 vnet (epair) interfaces per jail
+          - start and stop (boot/BP) prioritization
+          - soft and cold restart
+          
+The base concept is to have a completely self contained ZFS jail with
+all of its configuration and necessary files stored under one ZFS filesystem
+which can be easily replicated over the network, backed up and cloned.
+VNET support has been added to take advantage of advanced networking
+virtualization.
+
+Please note: This version of zjail works only with a VNET enabled kernel.
+
+All jail related configuration parameters are stored as custom ZFS
+properties in the jail's top level filesystem in the following format:
+'com.cellcontainer.jail:'.
+For more information on custom ZFS user properties please see zfs manual page.
+
+The filesystem hierarchy is the following:
+zfspool/zjails - root filesystem for all zjails related content on the
+                 system (everything lives here)
+
+zfspool/zjails/install - downloaded archive files from FTP
+                         (required for install) 
+
+zfspool/zjails/jds - filesystem for jail datasets
+
+zfspool/zjails/jds/local - datesets for local jails which are not replicated
+
+zfspool/zjails/jds/remote  - jail datasets which have been received from
+                             other jail hosts.
+
+zfspool/zjails/jds/replicated - jail datasets which are being replicated from
+                                this system to another
+
+Example:
+zfspool/zjails/jds/local/jail01 - local jail named jail01
+zfspool/zjails/jds/replicated/jail02 - replicated jail named jail02 
+zfspool/zjails/jds/local/jail01/root - the root filesystem for jail01
+
+------------------------------------------------------------------------
+Jails are deployed from a base jail which is a pristine FreeBSD install
+created at install time (zjail install).
+The base jail is snapshoted at jail creation time and this snapshot is
+used with "zfs send and receive" to create our jails. There are two ways
+for creating a jail, thick (default) and thin.
+A thick creation means that a full zfs send and recive is performed from
+the base jail, thin creation however will use the zfs clone function.
+Thin creation means the base jail is cloned - this is significantly
+faster and consumes a fraction of space.
+For maximum flexibility a thick creation is the preferred way.
+
+Zjail allows two kinds of stop or restart actions - soft and cold.
+
+- Soft restart or stop will only stop or restart processes in the jail,
+on the other hand:
+- Cold restart or stop will completely reinitializes the
+whole jail with all its interfaces (just like power cycling a machine).
+This is achieved by using the "persist" jail option by default, which 
+means that even after all processes stopped in a jail the jail is still up.
+A soft restart presents less overhead and possibly less likely to cause
+unwanted behaviour in combination with VNET.
+
+USAGE
+-----
+
+NOTE: before first use please edit zjail and modify the "my $pool" variable
+     (you need your ZFS pool name here)
+
+Run "zjail" utility as bellow. 
+
+       zjail list [all templates replicated remote]
+       zjail show jailname
+       zjail create jailname ip= hostname= [property=value]
+       zjail start jailname
+       zjail stop [-c] jailname
+       zjail restart
+       zjail rename jailname newname
+       zjail move jailname container=[local replicated]
+       zjail clone jailname clonename ip= hostname= [property=value]
+       zjail startall
+       zjail stopall [-c]
+       zjail set [property=value] jailname
+       zjail install
+       zjail destroy jailname
+       zjail backup jailname
+       zjail restore jailname
+       zjail console jailname
+       zjail take_template jailname templatename
+
+NOTE: There are some undocumented options and functions which will be
+      cleaned up and recorded at a later time.
+
+       - set up zjail environment from scratch
+       # zjail install
+
+       - create a jail jail01
+       # zjail create ip=192.168.1.1 hostname=jail01.local \
+             defaultroute=192.168.1.254 netmask=24 jail01
+
+       - clone jail01 to jail02
+       # zjail clone jail01 ip=192.168.1.2 hostname=jail02.local \
+             defaultroute=192.168.1.254 netmask=24 jail02
+
+       - list all jails including base installation
+       # zjail list all
+
+       - list only local and replicated jails
+       # zjail ls or zjail list
+
+       - drop into jail01
+       # zjail co jail01 or zjail console jail01
+
+       - set hostname of jail02
+       # zjail set hostname=jail03.local jail02
+
+       - set boot priority to 20 (default is 99, number < 99 means higher
+         start, stop and boot priority)
+       # zjail set priority=20 jail02
+
+       - turn off boot time start
+       # zjail set boot=off jail02
+
+       - turn deduplication on for jail02
+       # zjail set dedup=on jail02
+
+       - set notes for jail02
+       # zjail set notes="This jail is for temporary use only" jail02
+
+       - show everything about jail02
+       # zjail show jail02
+
+       - assign two interfaces - vnet0 vnet1 - to jail02
+       # zjail set vnet_if="vnet0 vnet1" jail02
+
+       - connect vnet0 to vswitch1 and vnet1 to vswitch2 on jail02
+       # zjail set vnet0=vswitch0 vnet1=vswitch1 jail02
+
+       - destroy jail02
+       # zjail destroy jail02
+
+       - soft restart jail01
+       # zjail restart jail01
+ 
+       - cold restart jail01
+       # zjail restart -c jail01
+
+       - thin create jail03 from default base template
+       # zjail clone base ip=192.168.1.105 hostname=jail03.local jail03
+
+       - take template jail01-tmp from jail01
+       # zjail take_template jail01 jail01-tmp
+
+       - list templates only
+       # zjail list templates
+
+      
+SETUP
+-----
+
+-- Pre-installation requirements --
+
+Minimum OS requirements : ZFSv28, FreeBSD 9.0 (amd64),
+                          Kernel with VNET support
+Required Perl modules: POSIX, Getopt::Lucid, Net::FTP, Perl6::Form
+
+-- KERNEL --
+Recompile your KERNEL with VNET and if needed with resource containers
+support:
+  
+add the following lines to your KERNEL config:
+
+options         VIMAGE
+options         RACCT                   # Resource containers
+options         RCTL                    # same as above
+
+**********************************************************************
+WARNING: - exclude ROUTETABLES options (fibs) from the kernel as this
+           will make the system extremely unstable with VNET!
+         - don't use PF firewall with VNET as it will crash your box
+           sooner or later!
+         - don't load any form of wireless or bluetooth kernel modules
+           will result in a boot time PANIC!
+**********************************************************************
+
+-- PACKAGES --
+This is a full pkg list generated from the test machine 
+(you dont need to install all, just install the ones stated above) 
+
+ p5-Authen-SASL
+ p5-Class-Data-Inheritable
+ p5-Devel-StackTrace
+ p5-Digest-HMAC
+ p5-Exception-Class 
+ p5-Exception-Class
+ p5-GSSAPI
+ p5-Getopt-Lucid
+ p5-Net
+ p5-Net-FTP
+ p5-Perl6-Export
+ p5-Perl6-Form
+ p5-Scalar-List-Utils
+ p5-Test-Simple
+
+-- DEVFS --
+Devfs configuration:
+There is a bug in /etc/rc.d/devfs, namely it wont load any custom devfs
+rules if they are not present at boot time.
+This is presents a problem with custom devfs rules created after system
+startup.
+
+To mitigate this you need to edit /etc/rc.d/devfs - devfs_start() function.
+
+Modify line:
+if [ -n "$devfs_system_ruleset" -o -n "$devfs_set_rulesets" ]; then
+TO
+if [ -n "$devfs_system_ruleset" -o -n "$devfs_set_rulesets" -o -n "$devfs_rulesets" ]; then
+
+Create custom /etc/devfs.rules file (this is only needed if you intend to
+assign exclusive ZFS datasets and use tools like neststat in a jail)
+
+[zfsnetenable=10] 
+add path 'zfs' unhide
+add path 'mem' unhide
+add path 'kmem' unhide
+ 
+*************************************************************************
+WARNING!!! - assigning /dev/mem and /dev/kmem to a Jail in certain cases
+             may present SERIOUS security flaws!!!
+*************************************************************************
+
+-- RC.CONF --
+Add these lines to /etc/rc.conf (customize it to your needs)
+---------------------- /etc/rc.conf -----------------------------
+cloned_interfaces="bridge0 bridge1 bridge2"
+ifconfig_bridge0_name="vswitch0"
+ifconfig_bridge1_name="vswitch1"
+ifconfig_bridge2_name="vswitch2"
+ifconfig_vswitch0="inet 10.5.100.254 netmask 255.255.255.0 up"
+ifconfig_vswitch1="inet 10.6.100.254 netmask 255.255.255.0 up"
+ifconfig_vswitch2="inet 10.7.100.254 netmask 255.255.255.0 up"
+
+gateway_enable="YES"
+-----------------------------------------------------------------
+
+JAIL REPLICATION
+----------------
+
+For the replication part to work, please install sysutils/zfsnap and
+configure periodic snapshotting for  zfspool/zjails/jds/replicated.
+
+After zfsnap configuration create a cron entry for replicate.sh.
+
+Simple replication script:
+-------------------------- replicate.sh -----------------------------
+#!/bin/sh
+
+NODE_A=`/sbin/zfs list -Ho name -d1 -t snapshot tank/zjails/jds/replicated | tail -1`
+NODE_B=`ssh root@jailhost02 "/sbin/zfs list -Ho name -d1 -t snapshot tank/zjails/jds/remote | tail -1 | sed s/remote/replicated/g"`
+LOCK="/var/run/zfs-replica.lock"
+
+if [ -e $LOCK ] ; then
+    echo "WARNING: ZFS sync already in progress ...exiting!"
+    exit 1
+fi
+
+if [ ! -e $LOCK -a "$NODE_A" != "$NODE_B" ] ; then
+    touch $LOCK
+    /sbin/zfs send -R -I $NODE_B $NODE_A | ssh -C jailhost02 "zfs recv -F tank/zjails/jds/remote"
+    rm $LOCK
+fi
+
+exit 0
+--------------------------------------------------------------------
+This will replicate all your jails in the replicated zfs filesystem
+from node A to node B. Please note, this is not a real time replication
+solution, but rather a periodic active->passive type. One could use
+HAST to do block level realtime replication.
+
+BUGS
+----
+The tool is stable enough for testing and light use. Expect a lot of
+bugs at this stage mainly due to VNET.
+
+Email your bug report to zjail@cellcontainer.com.
+
+TODO
+----
+Write a comprehensive manual page and documentation.
+Bugfixes and code cleanup.
+Add dynamic reconfiguration option to reflect saved changes on the fly 
+without restarting the jail).
+Add single jail replication and backup options.
+Add import and autoscan functions (to find jails anywhere on the system)
+Add resource limiting features using rctl
+
+
+GIT REPOSITORY
+--------------
+
+If you want to get the very latest version of zjail direct from the
+source code repository then you can use git:
+
+    git clone git://git.code.sf.net/p/zjails/code zjails-code 
+
+DOWNLOAD
+--------
+
+Download from https://sourceforge.net/projects/zjails/files/
+
+COPYRIGHT
+---------
+
+Zjail may be used, modified and redistributed only under the terms of
+the BSD License.
