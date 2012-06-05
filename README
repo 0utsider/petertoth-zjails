@@ -19,8 +19,6 @@ which can be easily replicated over the network, backed up and cloned.
 VNET support has been added to take advantage of advanced networking
 virtualization.
 
-Please note: This version of zjail works only with a VNET enabled kernel.
-
 All jail related configuration parameters are stored as custom ZFS
 properties in the jail's top level filesystem in the following format:
 'com.cellcontainer.jail:'.
@@ -163,6 +161,9 @@ NOTE: There are some undocumented options and functions which will be
 
        - list templates only
        # zjail list templates
+ 
+       - turn VNET on for jail01
+       # zjail set vnet=on jail01
 
       
 SETUP
