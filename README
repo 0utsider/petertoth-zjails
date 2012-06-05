@@ -164,6 +164,9 @@ NOTE: There are some undocumented options and functions which will be
        - list templates only
        # zjail list templates
 
+       - turn VNET on for jail01
+       # zjail set vnet=on jail01
+
       
 SETUP
 -----
