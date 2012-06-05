@@ -161,7 +161,7 @@ NOTE: There are some undocumented options and functions which will be
 
        - list templates only
        # zjail list templates
- 
+
        - turn VNET on for jail01
        # zjail set vnet=on jail01
 
@@ -172,7 +172,7 @@ SETUP
 -- Pre-installation requirements --
 
 Minimum OS requirements : ZFSv28, FreeBSD 9.0 (amd64),
-                          Kernel with VNET support
+                          Kernel with VNET support (if VNET is required)
 Required Perl modules: POSIX, Getopt::Lucid, Net::FTP, Perl6::Form
 
 -- KERNEL --
@@ -287,6 +287,28 @@ This will replicate all your jails in the replicated zfs filesystem
 from node A to node B. Please note, this is not a real time replication
 solution, but rather a periodic active->passive type. One could use
 HAST to do block level realtime replication.
+
+OTHER CONSIDERATIONS
+
+Jails rc.conf file (taken from ezjail's recommendations)
+----------------------rc.conf-------------------------------
+# Disable rpc
+rpcbind_enable="NO"
+
+# Prevent jails executing cron jobs at the same time
+cron_flags="$cron_flags -J 15"
+
+# Disable network sockets for syslog
+syslogd_flags="-ss"
+
+# Disable sendmail
+sendmail_enable="NO"
+sendmail_submit_enable="NO"
+sendmail_outbound_enable="NO"
+sendmail_msp_queue_enable="NO"
+------------------------------------------------------------
+
+Disable adjkerntz in jail's crontab
 
 BUGS
 ----
