@@ -81,7 +81,6 @@ my @config = qw/ hostname        ip             name
                  template_name   owner          itype
                  defaultroute    vnet_if        netmask
                  vnet0_sw        vnet1_sw       vnet2_sw
-                 vnet
              /;
 
 # This is a simple reference for the @config array above
@@ -99,8 +98,6 @@ my @config = qw/ hostname        ip             name
 # priority		30	31	32
 # template_name		33	34	35
 # defaultroute		36	37	38
-# vnet0_sw		39	40	41
-# vnet			42
 #--------------------------------------------------------
 
 my @specs = (   Switch("create")           ->needs("hostname","ip"),
@@ -158,11 +155,10 @@ my @specs = (   Switch("create")           ->needs("hostname","ip"),
                 Param("owner")                ->default("none"),
                 Param("itype")                ->default("ftp"),
                 Param("container")            ->default("local"),
-                Param("vnet")                 ->default("on"),
                 Param("vnet_if")              ->default("vnet0"),
                 Param("netmask")              ->default("24"),
                 Param("defaultroute")         ->default("0.0.0.0"),
-                Param("vnet0_sw")             ->default("vswitch0"),
+                Param("vnet0_sw")             ->default("bridge0"),
                 Param("vnet1_sw"),
                 Param("vnet2_sw"),
 );
@@ -279,7 +275,7 @@ sub label { # Set or label custom ZFS properties for our jails
                           13, 14, 15, 17, 19,
                           20, 22, 27, 28, 29,
                           30, 36, 37, 38, 39,
-                          40, 41, 42
+                          40, 41
     ]; # pick only entries we need
 
     if ($opts{set} eq "1") { # Workaround "set" subcommand as there is no need for the name to be set again
@@ -314,8 +310,7 @@ sub show {
                            10, 11, 12, 13, 14,
                            15, 22, 23, 27,  3,
                            28, 30, 31, 32, 36,
-                           37, 38, 39, 40, 41,
-                           42
+                           37, 38, 39, 40, 41
     ];
  
     sub format_show { # Format output 
@@ -461,7 +456,7 @@ sub start_stop {
                                    8,  9, 10, 11, 12,
                                   13, 14, 15, 20, 21,
                                   28, 29, 30, 36, 37,
-                                  38, 42
+                                  38
     ];
 
     while (<@zconf>) {
@@ -543,57 +538,51 @@ sub start_stop {
         }
 
         print "  Initiating cold start for: $jail\n";
+        system "jail -c vnet name=$jail host.hostname=$zconf{hostname} path=$zconf{mountpoint}\/root securelevel=$zconf{seclevel} host.hostuuid=$zconf{hostuuid} enforce_statfs=1 allow.mount=1 persist";
 
-        if ($zconf{vnet} eq "on") {
-            system "jail -c vnet name=$jail host.hostname=$zconf{hostname} path=$zconf{mountpoint}\/root securelevel=$zconf{seclevel} host.hostuuid=$zconf{hostuuid} enforce_statfs=1 allow.mount=1 persist";
-            system "jexec $jail /sbin/ifconfig lo0 127.0.0.1 up";
-        }
-        else {
-            system "jail -c name=$jail host.hostname=$zconf{hostname} path=$zconf{mountpoint}\/root securelevel=$zconf{seclevel} ip4.addr=$zconf{ip} host.hostuuid=$zconf{hostuuid} enforce_statfs=1 allow.mount=1 persist"; 
-        }
- 
         system "jls | grep $jail | awk '{print \$1}' > /var/run/jail_$opts{name}.id";
         system "$zfs set $cprop$config[31]\=$date $dataset";
 
+        system "jexec $jail /sbin/ifconfig lo0 127.0.0.1 up";
+
         &status; # Get $id
-        
-        if ($zconf{vnet} eq "on") {
-            my @ifaces = $zconf{vnet_if};
 
-            while (<@ifaces>) {
-                my $epair = `/sbin/ifconfig epair create`;
-                chomp($epair);
+        my @ifaces = $zconf{vnet_if};
 
-                $epair =~ s/[a-z]//g;
+        while (<@ifaces>) {
+            my $epair = `/sbin/ifconfig epair create`;
+            chomp($epair);
 
-                my $epair_a = "epair".$epair."a";
-                my $epair_b = "epair".$epair."b";
-                my $vswitch = `$zfs get -Ho value $cprop$_"_sw" $dataset`;
-                chomp($vswitch);
-                print "  $_\-\>$vswitch\n";
+            $epair =~ s/[a-z]//g;
 
-                system "/sbin/ifconfig $epair_a name $_-$id";
+            my $epair_a = "epair".$epair."a";
+            my $epair_b = "epair".$epair."b";
+            my $vswitch = `$zfs get -Ho value $cprop$_"_sw" $dataset`;
+            chomp($vswitch);
+            print "  $_\-\>$vswitch\n";
+
+            system "/sbin/ifconfig $epair_a name $_-$id";
             
-                #system "/sbin/ifconfig $vswitch addm $_-$id up";
-                #system "/sbin/ifconfig $_-$id up";
-                system "/sbin/ifconfig $epair_b vnet $jail";
-                system "jexec $jail /sbin/ifconfig $epair_b name $_";
+            #system "/sbin/ifconfig $vswitch addm $_-$id up";
+            #system "/sbin/ifconfig $_-$id up";
+            system "/sbin/ifconfig $epair_b vnet $jail";
+            system "jexec $jail /sbin/ifconfig $epair_b name $_";
 
-                if ($_ eq "vnet0" && $vswitch ne "-") {
-                    system "/sbin/ifconfig $vswitch addm $_-$id up";
-                    system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
-                    system "jexec $jail /sbin/ifconfig $_ $zconf{ip}/$zconf{netmask}";
-                    system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
-                    system "/sbin/ifconfig $_-$id up";
-                }
-                elsif ($_ ne "vnet0" && $vswitch ne "-") {
-                    system "/sbin/ifconfig $vswitch addm $_-$id up";
-                    system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
-                    system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
-                    system "/sbin/ifconfig $_-$id up";
-               }
+            if ($_ eq "vnet0" && $vswitch ne "-") {
+                system "/sbin/ifconfig $vswitch addm $_-$id up";
+                system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
+                system "jexec $jail /sbin/ifconfig $_ $zconf{ip}/$zconf{netmask}";
+                system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
+                system "/sbin/ifconfig $_-$id up";
+            }
+            elsif ($_ ne "vnet0" && $vswitch ne "-") {
+                system "/sbin/ifconfig $vswitch addm $_-$id up";
+                system "/sbin/ifconfig $_-$id description \"Attached to Jail: $jail\"";
+                system "jexec $jail /sbin/route add default $zconf{defaultroute} > /dev/null 2>&1";
+                system "/sbin/ifconfig $_-$id up";
             }
         }
+
 
         system "/sbin/devfs -m $zconf{mountpoint}\/root/dev rule -s 4 applyset";
         system "/sbin/devfs -m $zconf{mountpoint}\/root/dev rule -s 10 applyset";
@@ -624,13 +613,10 @@ sub start_stop {
             system "/sbin/umount $zconf{mountpoint}\/root/dev";
         }
 
+        my @ifaces = $zconf{vnet_if};
 
-        if ($zconf{vnet} eq "on") {
-            my @ifaces = $zconf{vnet_if};
-
-            while (<@ifaces>) {
-                system "/sbin/ifconfig $_-$id destroy";
-            }
+        while (<@ifaces>) {
+            system "/sbin/ifconfig $_-$id destroy";
         }
 
         system "$zfs set $cprop$config[32]\=$date $dataset";
@@ -860,26 +846,7 @@ sub help {
                "       zjail backup jailname",
                "       zjail restore jailname",
                "       zjail console jailname",
-               "       zjail take_template jailname templatename",
-               "       ",
-               "Examples:",
-               "       start jail01:",
-               "       zjail start jail01",
-               "       ",
-               "       soft stop (default behaviour) jail01:",
-               "       zjail stop jail01",
-               "       ",
-               "       cold stop jail01:",
-               "       zjail stop -c jail01",
-               "       ",
-               "       turn VNET on for jail01:",
-               "       zjail set vnet=on jail01",
-               "       ",
-               "       set up zjail environment from scratch:",
-               "       zjail install",
-               "       ",
-               "       list all jails including base installation:",
-               "       zjail list all";
+               "       zjail take_template jailname templatename";
 }
 
 sub console {
