@@ -12,6 +12,7 @@ Some of the available features:
           - up to 3 vnet (epair) interfaces per jail
           - start and stop (boot/BP) prioritization
           - soft and cold restart
+          - binary and source updates
           
 The base concept is to have a completely self contained ZFS jail with
 all of its configuration and necessary files stored under one ZFS filesystem
@@ -95,6 +96,7 @@ Run "zjail" utility as bellow.
        zjail restore jailname
        zjail console jailname
        zjail take_template jailname templatename
+       zjail update [-b -s] jailname
 
 NOTE: There are some undocumented options and functions which will be
       cleaned up and recorded at a later time.
@@ -164,6 +166,15 @@ NOTE: There are some undocumented options and functions which will be
 
        - turn VNET on for jail01
        # zjail set vnet=on jail01
+
+       - binary update jail01
+       # zjail update -b jail01
+
+       - source update jail01
+       # zjail update -s jail01
+
+       - binary update all jails
+       # zjail update -b ALL
 
       
 SETUP
@@ -312,9 +323,6 @@ Disable adjkerntz in jail's crontab
 
 BUGS
 ----
-The tool is stable enough for testing and light use. Expect a lot of
-bugs at this stage mainly due to VNET.
-
 Email your bug report to zjail@cellcontainer.com.
 
 TODO

@@ -57,6 +57,7 @@ my $hostuuid  = `uuidgen`;
 my $ftphost   = "ftp.freebsd.org";
 my $release   = `uname -r`;
 my @ftpfiles  = qw(base.txz doc.txz lib32.txz);
+my $src       = "/usr/src";
 
 my %container;
    $container{local}      = "$jds/local";
@@ -130,6 +131,10 @@ my @specs = (   Switch("create")           ->needs("hostname","ip"),
                 Switch("restart"),
                 Switch("thin"),
                 Switch("cold|-c"),
+                Switch("update"),
+                Switch("source|-s"),
+                Switch("binary|-b"),
+                Switch("rollback|-r"),
                 # Jail settings --------------------------------------
                 Param("hostname|host"),
                 Param("ip"),
@@ -153,7 +158,7 @@ my @specs = (   Switch("create")           ->needs("hostname","ip"),
                 Param("flags")                ->default("\-l\ \-U\ root"),
                 Param("cpuset|cpu")           ->default("$cpuset"),
                 Param("fib")                  ->default("0"),
-                Param("seclevel|s")           ->default("$seclevel"),
+                Param("seclevel|sec")             ->default("$seclevel"),
                 Param("hostuuid|hu")          ->default("$hostuuid"),
                 Param("priority|p")           ->default("99"),
                 Param("owner")                ->default("none"),
@@ -266,6 +271,10 @@ elsif ($opts{move} eq 1) {
 elsif ($opts{restart} eq 1) {
     &check_root("restart");
     &restart($ARGV[0]);
+}
+elsif ($opts{update} eq 1) {
+    &check_root("update");
+    &update($ARGV[0]);
 }
 else {
     &help;
@@ -862,6 +871,7 @@ sub help {
                "       zjail restore jailname",
                "       zjail console jailname",
                "       zjail take_template jailname templatename",
+               "       zjail update [-b -s] jailname",
                "       ",
                "Examples:",
                "       start jail01:",
@@ -1067,7 +1077,7 @@ sub install {
 
     sub make_install {
         my $destdir = "/$jails/jds/templates/$dtemplate\/root";
-        system "cd /usr/src && make world DESTDIR=$destdir && make distribution DESTDIR=$destdir";
+        system "cd $src && make world DESTDIR=$destdir && make distribution DESTDIR=$destdir";
     }
 
     if ($type eq "ftp") {
@@ -1177,4 +1187,64 @@ sub take_template {
     my $fpath = `$zfs get -Ho value mountpoint $fs`;
     chomp($fpath);
     system "touch $fpath/fstab";
+}
+
+sub update {
+    my @jails;
+    my ($jail) = @_;
+    my @updt_datasets = ("$container{local}","$container{replicated}","$container{templates}");
+
+    if (!defined($jail)) {
+        die " ERR: specify jail name or enter ALL for updating all jails\n";
+    }
+    elsif ($jail eq "ALL") {
+
+        foreach (<@updt_datasets>) {
+            my @list = `$zfs list -rHo name -d1 $_`;
+            shift(@list);
+            push(@jails, @list);
+        } 
+        while (<@jails>) {
+            my $destdir = `$zfs get -Ho value "$config[21]" $_`;
+            chomp($destdir);
+            
+            my $jname = `$zfs get -Ho value $cprop"name" $_`;
+            chomp($jname);
+            my $jail = $jname;
+ 
+            print " Updating jail: $jail\n";
+            &updt_type($destdir);
+        }
+    }
+    else {
+            my $dataset = &find_jail($jail);
+            my $destdir = `$zfs get -Ho value mountpoint $dataset`;
+            chomp($destdir);
+
+            print " Updating jail: $jail\n";
+            &updt_type($destdir);
+    } 
+
+    sub updt_type {
+        my ($destdir) = @_;
+
+        if ($opts{binary}) {
+            print " Running binary upgrade..\n";
+            `freebsd-update -b $destdir\/root fetch`;
+            `freebsd-update -b $destdir\/root install`;
+        } 
+        elsif ($opts{source}) {
+            print " Running source upgrade..\n";
+            `cd $src && make installworld DESTDIR=$destdir\/root > /dev/null`;
+        }
+        elsif ($opts{rollback}) {
+            print " Running upgrade rollback..\n";
+            `freebsd-update -b $destdir\/root rollback`
+        }
+        else {
+            print " No update type specified (select either -s for source or -b for binary update), no update was performed!\n";
+            exit 1;
+        }
+    }
+
 }
